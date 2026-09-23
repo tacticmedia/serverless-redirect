@@ -1,0 +1,11 @@
+{
+  "name": "serverless-redirect",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "yaml": "2.9.1"
+  }
+}

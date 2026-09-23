@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Redirect all requests from OldDomainName to NewDomainName, keeping path and query string.
+
+Parameters:
+  OldDomainName:
+    Type: String
+    Description: Hostname to redirect from.
+  NewDomainName:
+    Type: String
+    Description: Hostname to redirect to.
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Public hosted zone that contains OldDomainName.
+  RedirectType:
+    Type: String
+    AllowedValues: [permanent, temporary]
+    Default: permanent
+    Description: permanent = 308, temporary = 307.
+  AcmCertificateArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:acm:us-east-1:\d{12}:certificate/[0-9a-f-]+$'
+    ConstraintDescription: Must be empty or an ACM certificate ARN in us-east-1.
+    Description: Existing certificate for OldDomainName. Empty = stack creates it, which requires us-east-1.
+
+Conditions:
+  CreateCertificate: !Equals [!Ref AcmCertificateArn, '']
+
+Rules:
+  RequireUsEast1ForCreatedCertificate:
+    RuleCondition: !Equals [!Ref AcmCertificateArn, '']
+    Assertions:
+      - Assert: !Equals [!Ref AWS::Region, us-east-1]
+        AssertDescription: CloudFront accepts ACM certificates from us-east-1 only. Deploy in us-east-1 or set AcmCertificateArn.
+
+Mappings:
+  AwsConstants:
+    CloudFront:
+      AliasTargetHostedZoneId: Z2FDTNDATAQYW2
+      CachingDisabledPolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+  RedirectTypes:
+    permanent:
+      StatusCode: 308
+      StatusDescription: Permanent Redirect
+    temporary:
+      StatusCode: 307
+      StatusDescription: Temporary Redirect
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateCertificate
+    Properties:
+      DomainName: !Ref OldDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref OldDomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  RedirectFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-redirect'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: !Sub 'Redirect to ${NewDomainName}'
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub
+        - |
+          function handler(event) {
+            var request = event.request;
+            var proto = request.headers['cloudfront-forwarded-proto'];
+            var scheme = proto ? proto.value.toLowerCase() : 'http';
+            var query = request.rawQueryString();
+            return {
+              statusCode: ${StatusCode},
+              statusDescription: '${StatusDescription}',
+              headers: { location: { value: scheme + '://${NewDomainName}' + request.uri + (query === undefined ? '' : '?' + query) } }
+            };
+          }
+        - StatusCode: !FindInMap [RedirectTypes, !Ref RedirectType, StatusCode]
+          StatusDescription: !FindInMap [RedirectTypes, !Ref RedirectType, StatusDescription]
+
+  ForwardedProtoPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub '${AWS::StackName}-forwarded-proto'
+        Comment: Exposes CloudFront-Forwarded-Proto to the viewer-request function.
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers: [CloudFront-Forwarded-Proto]
+        CookiesConfig:
+          CookieBehavior: none
+        QueryStringsConfig:
+          QueryStringBehavior: none
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_34
+            comment: Redirect keeps the viewer scheme. NewDomainName decides on HTTPS.
+          - id: CKV_AWS_68
+            comment: No origin is reachable. The function answers every request.
+          - id: CKV_AWS_86
+            comment: Redirect only. No logs kept.
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        IPV6Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_All
+        Aliases:
+          - !Ref OldDomainName
+        ViewerCertificate:
+          AcmCertificateArn: !If [CreateCertificate, !Ref Certificate, !Ref AcmCertificateArn]
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: NewDomain
+            DomainName: !Ref NewDomainName
+            CustomOriginConfig:
+              OriginProtocolPolicy: match-viewer
+        DefaultCacheBehavior:
+          TargetOriginId: NewDomain
+          ViewerProtocolPolicy: allow-all
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: !FindInMap [AwsConstants, CloudFront, CachingDisabledPolicyId]
+          OriginRequestPolicyId: !Ref ForwardedProtoPolicy
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt RedirectFunction.FunctionMetadata.FunctionARN
+
+  DnsRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref OldDomainName
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: !FindInMap [AwsConstants, CloudFront, AliasTargetHostedZoneId]
+        - Name: !Ref OldDomainName
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: !FindInMap [AwsConstants, CloudFront, AliasTargetHostedZoneId]
+
+Outputs:
+  DistributionId:
+    Value: !Ref Distribution
