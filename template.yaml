@@ -1,16 +1,25 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Redirect all requests from OldDomainName to NewDomainName, keeping path and query string.
+Description: Redirect all requests from OldDomainName, and optionally www.OldDomainName, to NewDomainName, keeping scheme, path and query string.
 
 Parameters:
   OldDomainName:
     Type: String
+    AllowedPattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$'
+    ConstraintDescription: Must be a lowercase hostname without a wildcard.
     Description: Hostname to redirect from.
+  IncludeWww:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Also redirect www.OldDomainName.
   NewDomainName:
     Type: String
+    AllowedPattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$'
+    ConstraintDescription: Must be a lowercase hostname.
     Description: Hostname to redirect to.
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
-    Description: Public hosted zone that contains OldDomainName.
+    Description: Public hosted zone that contains OldDomainName and www.OldDomainName.
   RedirectType:
     Type: String
     AllowedValues: [permanent, temporary]
@@ -21,10 +30,11 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^arn:aws:acm:us-east-1:\d{12}:certificate/[0-9a-f-]+$'
     ConstraintDescription: Must be empty or an ACM certificate ARN in us-east-1.
-    Description: Existing certificate for OldDomainName. Empty = stack creates it, which requires us-east-1.
+    Description: Existing certificate for OldDomainName, and www.OldDomainName if IncludeWww. Empty = stack creates it, which requires us-east-1.
 
 Conditions:
   CreateCertificate: !Equals [!Ref AcmCertificateArn, '']
+  RedirectWww: !Equals [!Ref IncludeWww, 'true']
 
 Rules:
   RequireUsEast1ForCreatedCertificate:
@@ -52,10 +62,16 @@ Resources:
     Condition: CreateCertificate
     Properties:
       DomainName: !Ref OldDomainName
+      SubjectAlternativeNames: !If [RedirectWww, [!Sub 'www.${OldDomainName}'], !Ref AWS::NoValue]
       ValidationMethod: DNS
       DomainValidationOptions:
         - DomainName: !Ref OldDomainName
           HostedZoneId: !Ref HostedZoneId
+        - !If
+          - RedirectWww
+          - DomainName: !Sub 'www.${OldDomainName}'
+            HostedZoneId: !Ref HostedZoneId
+          - !Ref AWS::NoValue
 
   RedirectFunction:
     Type: AWS::CloudFront::Function
@@ -114,6 +130,7 @@ Resources:
         PriceClass: PriceClass_All
         Aliases:
           - !Ref OldDomainName
+          - !If [RedirectWww, !Sub 'www.${OldDomainName}', !Ref AWS::NoValue]
         ViewerCertificate:
           AcmCertificateArn: !If [CreateCertificate, !Ref Certificate, !Ref AcmCertificateArn]
           SslSupportMethod: sni-only
@@ -149,6 +166,22 @@ Resources:
           AliasTarget:
             DNSName: !GetAtt Distribution.DomainName
             HostedZoneId: !FindInMap [AwsConstants, CloudFront, AliasTargetHostedZoneId]
+        - !If
+          - RedirectWww
+          - Name: !Sub 'www.${OldDomainName}'
+            Type: A
+            AliasTarget:
+              DNSName: !GetAtt Distribution.DomainName
+              HostedZoneId: !FindInMap [AwsConstants, CloudFront, AliasTargetHostedZoneId]
+          - !Ref AWS::NoValue
+        - !If
+          - RedirectWww
+          - Name: !Sub 'www.${OldDomainName}'
+            Type: AAAA
+            AliasTarget:
+              DNSName: !GetAtt Distribution.DomainName
+              HostedZoneId: !FindInMap [AwsConstants, CloudFront, AliasTargetHostedZoneId]
+          - !Ref AWS::NoValue
 
 Outputs:
   DistributionId:

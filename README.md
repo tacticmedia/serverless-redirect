@@ -1,6 +1,6 @@
 # serverless-redirect
 
-CloudFormation stack that redirects every request on `OldDomainName` to `NewDomainName`, keeping scheme, path and query string unchanged. `http://` goes to `http://`, `https://` to `https://`. `NewDomainName` decides whether to upgrade to HTTPS. A CloudFront Function builds the response, so no origin is called.
+CloudFormation stack that redirects every request on `OldDomainName`, and optionally `www.OldDomainName`, to `NewDomainName`, keeping scheme, path and query string unchanged. `http://` goes to `http://`, `https://` to `https://`. `NewDomainName` decides whether to upgrade to HTTPS. A CloudFront Function builds the response, so no origin is called.
 
 Resources: CloudFront Function, origin request policy that exposes `CloudFront-Forwarded-Proto` to the function, CloudFront distribution, Route 53 A and AAAA alias records, and an ACM certificate unless `AcmCertificateArn` is set.
 
@@ -8,19 +8,20 @@ Resources: CloudFront Function, origin request policy that exposes `CloudFront-F
 
 You can either provide your own certificate ARN and deploy anywhere, or deploy to `us-east-1`, provide a Route53 hosted zone ID, and let this stack manage the cert for you. 
 
-If you manage the cert yourself, it must cover the `OldDomainName`, either directly, or via a wildcard.
+If you manage the cert yourself, it must cover the `OldDomainName`, and `www.OldDomainName` if `IncludeWww=true`, either directly, or via a wildcard. The stack never requests a wildcard certificate.
 
 ## Requirements
 
-- Public Route 53 hosted zone for `OldDomainName` in the same account.
-- No A or AAAA record for `OldDomainName` in that zone.
-- `OldDomainName` must not be an alternate domain name on another CloudFront distribution.
+- Public Route 53 hosted zone for `OldDomainName` in the same account. With `IncludeWww=true`, `www.OldDomainName` must be in the same zone.
+- No A or AAAA record for `OldDomainName` (and `www.OldDomainName`) in that zone.
+- `OldDomainName` (and `www.OldDomainName`) must not be an alternate domain name on another CloudFront distribution.
 
 ## Parameters
 
 | Name | Default | Value |
 |---|---|---|
-| `OldDomainName` | | Hostname to redirect from, for example `old.example.com` |
+| `OldDomainName` | | Hostname to redirect from, for example `old.example.com`. Lowercase, no wildcard. |
+| `IncludeWww` | `false` | `true` also redirects `www.OldDomainName` to the same target |
 | `NewDomainName` | | Hostname to redirect to, for example `new.example.com` |
 | `HostedZoneId` | | Hosted zone ID of `OldDomainName`, for example `Z111111QQQQQQQ` |
 | `RedirectType` | `permanent` | `permanent` returns 308, `temporary` returns 307 |
@@ -37,6 +38,7 @@ aws cloudformation deploy \
     OldDomainName=old.example.com \
     NewDomainName=new.example.com \
     HostedZoneId=Z111111QQQQQQQ \
+    IncludeWww=false \
     RedirectType=permanent
 ```
 
@@ -44,7 +46,7 @@ The command returns after ACM issues the certificate and CloudFront deploys the 
 
 With your own certificate, add `AcmCertificateArn=arn:aws:acm:us-east-1:111122223333:certificate/...` to `--parameter-overrides` and set `--region` as needed.
 
-To change `RedirectType`, run the same command with the new value.
+To change `RedirectType` or `IncludeWww`, run the same command with the new value. Changing `IncludeWww` replaces the stack-managed certificate.
 
 ## Verify
 
@@ -53,7 +55,7 @@ curl -sI 'https://old.example.com/a/b?x=1&y'
 curl -sI 'http://old.example.com/a/b?x=1&y'
 ```
 
-Expected: status `308` (or `307`) and `location: https://new.example.com/a/b?x=1&y` for the first request, `location: http://new.example.com/a/b?x=1&y` for the second.
+Expected: status `308` (or `307`) and `location: https://new.example.com/a/b?x=1&y` for the first request, `location: http://new.example.com/a/b?x=1&y` for the second. With `IncludeWww=true`, repeat with `www.old.example.com`; the `location` is the same.
 
 ## Remove
 
@@ -65,7 +67,7 @@ Use the region the stack was deployed in.
 
 ## Scope
 
-One hostname per stack. Deploy a second stack for `www.old.example.com`. The hosted zone is not managed by this stack.
+One hostname per stack, plus `www.` with `IncludeWww=true`. The hosted zone is not managed by this stack.
 
 ## QA
 
@@ -75,10 +77,12 @@ One hostname per stack. Deploy a second stack for `www.old.example.com`. The hos
 pip install cfn-lint==1.57.0 checkov==3.3.19
 cfn-lint template.yaml
 checkov --file template.yaml --framework cloudformation --compact --quiet
-node --test
+npm ci
+npm test
+actionlint
 ```
 
-`node --test` runs the function code from `template.yaml` in Node. It does not check CloudFront Functions runtime restrictions.
+`npm test` parses `template.yaml` and runs the function code in Node, with `!Sub` variables resolved from `Mappings`. It does not check CloudFront Functions runtime restrictions.
 
 ## Contributions
 
